@@ -1,0 +1,4 @@
+streamlit
+kiwipiepy
+scikit-learn
+pandas
