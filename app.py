@@ -471,10 +471,6 @@ def draw(chart):
     st.altair_chart(chart.configure(background="#ffffff"))
 
 
-def bar_height(n):
-    return max(160, n * 28)
-
-
 # ---------------- 페이지 ----------------
 
 def page_home():
@@ -655,10 +651,10 @@ def page_stats():
     passed = df["PROC_RESULT_CD"].str.contains("가결").mean() * 100
     m2.metric("가결 비율", f"{passed:.1f}%")
     m3.metric("가장 많은 위원회", df["위원회"].value_counts().index[0])
+    st.caption(f"위 지표는 전체 데이터 {len(df):,}건 기준입니다. 아래 그래프의 필터를 바꿔도 달라지지 않으며, 그래프마다 몇 건 기준인지 아래에 따로 적었습니다.")
 
     committees = sorted(df["CURR_COMMITTEE"].unique())
     results = sorted(df["PROC_RESULT_CD"].unique())
-    result_scale = alt.Scale(domain=list(RESULT_COLORS), range=list(RESULT_COLORS.values()))
 
     left, right = st.columns(2)
 
@@ -666,11 +662,13 @@ def page_stats():
     with card(left):
         st.markdown("#### 소관 위원회별 법안 분포")
         st.caption("어느 위원회에 법안이 많이 몰렸는지 보여줍니다. 막대가 길수록 해당 위원회가 맡은 법안이 많습니다.")
-        f1, f2 = st.columns(2)
+        f1, f2, f3 = st.columns([2, 2, 1.4])
         with f1:
             age = stat_filter("대수", ["제21대", "제22대"], "c_age")
         with f2:
             res = stat_filter("처리 결과", results, "c_res")
+        with f3:
+            show = st.selectbox("보기", ["상위 10개", "전체"], key="c_top")
         data = df
         if age:
             data = data[data["대수"] == age]
@@ -681,20 +679,24 @@ def page_stats():
         else:
             counts = data["위원회"].value_counts().reset_index()
             counts.columns = ["위원회", "건수"]
+            total = len(counts)
+            if show == "상위 10개":
+                counts = counts.head(10)
             chart = (
                 alt.Chart(counts)
                 .mark_bar(color=NAVY, cornerRadiusEnd=3)
                 .encode(
-                    x=alt.X("건수", title="법안 수"),
-                    y=alt.Y("위원회", sort="-x", title=None, axis=alt.Axis(labelLimit=0, labelFontSize=11)),
+                    x=alt.X("건수", title="법안 수", axis=alt.Axis(labelFontSize=12, titleFontSize=13)),
+                    y=alt.Y("위원회", sort="-x", title=None, axis=alt.Axis(labelLimit=0, labelFontSize=13)),
                     tooltip=["위원회", "건수"],
                 )
-                .properties(height=bar_height(len(counts)))
+                .properties(height=max(200, len(counts) * 34))
             )
-            text = chart.mark_text(align="left", dx=4, color="#334155").encode(text="건수")
+            text = chart.mark_text(align="left", dx=4, color="#334155", fontSize=13).encode(text="건수")
             draw(chart + text)
             merged = ", ".join(f"{old} → {new}" for old, new in COMMITTEE_MERGE.items() if " " not in old)
-            st.caption(f"{len(data):,}건 기준 · 22대에서 이름이 바뀐 위원회는 바뀐 이름으로 합쳐서 셌습니다. ({merged})")
+            shown = f"위원회 {total}개 중 상위 {len(counts)}개 · " if len(counts) < total else ""
+            st.caption(f"{shown}{len(data):,}건 기준 · 22대에서 이름이 바뀐 위원회는 바뀐 이름으로 합쳐서 셌습니다. ({merged})")
 
     # 2. 처리 결과 도넛
     with card(right):
@@ -716,12 +718,24 @@ def page_stats():
             counts = data["PROC_RESULT_CD"].value_counts().reset_index()
             counts.columns = ["처리 결과", "건수"]
             counts["비율(%)"] = (counts["건수"] / counts["건수"].sum() * 100).round(1)
+
+            # 그래프에는 많은 순 4개만 두고 나머지는 기타로 묶음
+            main = counts.head(4).copy()
+            rest = counts.iloc[4:]
+            if len(rest) > 0:
+                etc = pd.DataFrame({"처리 결과": ["기타"], "건수": [rest["건수"].sum()], "비율(%)": [rest["비율(%)"].sum().round(1)]})
+                main = pd.concat([main, etc], ignore_index=True)
+            names = list(main["처리 결과"])
+            donut_scale = alt.Scale(domain=names, range=[RESULT_COLORS.get(n, "#cbd5e1") for n in names])
             donut = (
-                alt.Chart(counts)
+                alt.Chart(main)
                 .mark_arc(innerRadius=75, outerRadius=130)
                 .encode(
                     theta=alt.Theta("건수", stack=True),
-                    color=alt.Color("처리 결과", scale=result_scale, legend=alt.Legend(title=None, orient="right")),
+                    color=alt.Color(
+                        "처리 결과", scale=donut_scale, sort=names,
+                        legend=alt.Legend(title=None, orient="right", labelFontSize=13, symbolSize=150),
+                    ),
                     order=alt.Order("건수", sort="descending"),
                     tooltip=["처리 결과", "건수", "비율(%)"],
                 )
@@ -734,8 +748,11 @@ def page_stats():
 
             table = counts.copy()
             table["비율(%)"] = table["비율(%)"].map(lambda v: f"{v:.1f}%")
+            st.markdown("**전체 처리 결과**")
             st.dataframe(table, hide_index=True)
-            st.caption("대안반영폐기는 다른 법안과 합쳐져 위원회 대안으로 반영된 경우입니다.")
+            etc_names = ", ".join(rest["처리 결과"]) if len(rest) > 0 else ""
+            etc_note = f" 그래프의 기타는 {etc_names}입니다." if etc_names else ""
+            st.caption(f"{len(data):,}건 기준 ·{etc_note} 대안반영폐기는 다른 법안과 합쳐져 위원회 대안으로 반영된 경우입니다.")
 
     left, right = st.columns(2)
 
@@ -743,26 +760,42 @@ def page_stats():
     with card(left):
         st.markdown("#### 월별 법안 발의 추이")
         st.caption("매달 몇 건의 법안이 발의됐는지 보여줍니다. 색으로 21대와 22대를 구분했습니다.")
-        com = stat_filter("소관 위원회", committees, "m_com")
+        f1, f2 = st.columns(2)
+        with f1:
+            com = stat_filter("소관 위원회", committees, "m_com")
+        with f2:
+            view = st.selectbox("보는 방식", ["임기 개월로 겹쳐 보기", "날짜순으로 보기"], key="m_view")
         data = df if not com else df[df["CURR_COMMITTEE"] == com]
         if len(data) == 0:
             st.info("조건에 맞는 법안이 없습니다.")
         else:
             counts = data.groupby(["MONTH", "대수"]).size().reset_index(name="건수")
             counts["월"] = pd.to_datetime(counts["MONTH"])
+            # 21대는 2020년 5월, 22대는 2024년 5월에 시작
+            start = counts["대수"].map({"제21대": 2020, "제22대": 2024})
+            counts["임기 개월"] = (counts["월"].dt.year - start) * 12 + counts["월"].dt.month - 4
+
+            if view == "임기 개월로 겹쳐 보기":
+                x = alt.X("임기 개월:Q", title="임기 시작 후 개월", axis=alt.Axis(values=list(range(0, 49, 6)), labelFontSize=12))
+            else:
+                x = alt.X("월:T", title="발의 월", axis=alt.Axis(format="%Y-%m", tickCount={"interval": "month", "step": 6}, labelAngle=0, labelFontSize=12))
             line = (
                 alt.Chart(counts)
-                .mark_line(point=alt.OverlayMarkDef(size=25), strokeWidth=2)
+                .mark_line(point=alt.OverlayMarkDef(size=25), strokeWidth=2.5)
                 .encode(
-                    x=alt.X("월", title="발의 월", axis=alt.Axis(format="%Y-%m", labelAngle=-45)),
+                    x=x,
                     y=alt.Y("건수", title="법안 수"),
-                    color=alt.Color("대수", scale=AGE_COLORS, legend=alt.Legend(title=None, orient="top")),
-                    tooltip=["MONTH", "대수", "건수"],
+                    color=alt.Color("대수", scale=AGE_COLORS, legend=alt.Legend(title=None, orient="top", labelFontSize=13)),
+                    tooltip=["대수", alt.Tooltip("MONTH", title="발의 월"), "임기 개월", "건수"],
                 )
                 .properties(height=320)
             )
             draw(line)
-            st.caption("수집한 표본 기준이라 실제 국회 전체 발의 건수와는 다릅니다.")
+            if view == "임기 개월로 겹쳐 보기":
+                how = "두 국회를 임기 시작 시점에 맞춰 겹쳤습니다. 같은 가로 위치는 임기 중 같은 시기입니다."
+            else:
+                how = "실제 발의 날짜 순서대로 이어서 보여줍니다."
+            st.caption(f"{len(data):,}건 기준 · {how} 수집한 표본 기준이라 실제 국회 전체 발의 건수와는 다릅니다.")
 
     # 4. 21대와 22대 비교
     with card(right):
@@ -788,6 +821,7 @@ def page_stats():
                 .properties(height=max(320, counts["PROC_RESULT_CD"].nunique() * 40))
             )
             draw(chart)
+            st.caption(f"{len(data):,}건 기준 · 대수마다 전체를 100%로 놓은 비율입니다.")
 
 
 def page_about():
