@@ -760,41 +760,70 @@ def page_stats():
     with card(left):
         st.markdown("#### 월별 법안 발의 추이")
         st.caption("매달 몇 건의 법안이 발의됐는지 보여줍니다. 색으로 21대와 22대를 구분했습니다.")
-        f1, f2 = st.columns(2)
+        f1, f2, f3 = st.columns([2, 2, 1.3])
         with f1:
             com = stat_filter("소관 위원회", committees, "m_com")
         with f2:
             view = st.selectbox("보는 방식", ["임기 개월로 겹쳐 보기", "날짜순으로 보기"], key="m_view")
+        with f3:
+            unit = st.selectbox("단위", ["월별", "분기별"], key="m_unit")
         data = df if not com else df[df["CURR_COMMITTEE"] == com]
         if len(data) == 0:
             st.info("조건에 맞는 법안이 없습니다.")
         else:
-            counts = data.groupby(["MONTH", "대수"]).size().reset_index(name="건수")
-            counts["월"] = pd.to_datetime(counts["MONTH"])
+            data = data.assign(월=pd.to_datetime(data["MONTH"]))
+            # 분기별이면 분기 첫 달로 모아서 셈
+            if unit == "분기별":
+                data["월"] = data["월"].dt.to_period("Q").dt.start_time
+            counts = data.groupby(["월", "대수"]).size().reset_index(name="건수")
+            counts["시기"] = counts["월"].dt.strftime("%Y-%m") if unit == "월별" else counts["월"].dt.to_period("Q").astype(str)
             # 21대는 2020년 5월, 22대는 2024년 5월에 시작
-            start = counts["대수"].map({"제21대": 2020, "제22대": 2024})
-            counts["임기 개월"] = (counts["월"].dt.year - start) * 12 + counts["월"].dt.month - 4
+            start = pd.to_datetime(counts["대수"].map({"제21대": "2020-05-01", "제22대": "2024-05-01"}))
+            counts["임기 개월"] = (counts["월"].dt.year - start.dt.year) * 12 + counts["월"].dt.month - start.dt.month + 1
+
+            color = alt.Color("대수", scale=AGE_COLORS, legend=alt.Legend(title=None, orient="top", labelFontSize=13))
+            tooltip = ["대수", alt.Tooltip("시기", title="발의 시기"), "임기 개월", "건수"]
+            y = alt.Y("건수", title="법안 수")
 
             if view == "임기 개월로 겹쳐 보기":
                 x = alt.X("임기 개월:Q", title="임기 시작 후 개월", axis=alt.Axis(values=list(range(0, 49, 6)), labelFontSize=12))
-            else:
-                x = alt.X("월:T", title="발의 월", axis=alt.Axis(format="%Y-%m", tickCount={"interval": "month", "step": 6}, labelAngle=0, labelFontSize=12))
-            line = (
-                alt.Chart(counts)
-                .mark_line(point=alt.OverlayMarkDef(size=25), strokeWidth=2.5)
-                .encode(
-                    x=x,
-                    y=alt.Y("건수", title="법안 수"),
-                    color=alt.Color("대수", scale=AGE_COLORS, legend=alt.Legend(title=None, orient="top", labelFontSize=13)),
-                    tooltip=["대수", alt.Tooltip("MONTH", title="발의 월"), "임기 개월", "건수"],
+                chart = (
+                    alt.Chart(counts)
+                    .mark_line(point=alt.OverlayMarkDef(size=25), strokeWidth=2.5)
+                    .encode(x=x, y=y, color=color, tooltip=tooltip)
+                    .properties(height=320)
                 )
-                .properties(height=320)
-            )
-            draw(line)
+            else:
+                # 아래 작은 그래프에서 드래그한 구간을 위 그래프에 크게 보여줌
+                brush = alt.selection_interval(encodings=["x"])
+                base = alt.Chart(counts).encode(color=color)
+                detail = (
+                    base.mark_line(point=alt.OverlayMarkDef(size=35), strokeWidth=2.5, clip=True)
+                    .encode(
+                        x=alt.X("월:T", title=None, scale=alt.Scale(domain=brush),
+                                axis=alt.Axis(format="%Y-%m", labelAngle=0, labelFontSize=12, labelOverlap=True)),
+                        y=y,
+                        tooltip=tooltip,
+                    )
+                    .properties(width="container", height=260)
+                )
+                overview = (
+                    base.mark_area(opacity=0.5)
+                    .encode(
+                        x=alt.X("월:T", title="아래 그래프에서 드래그하면 그 구간을 위에서 크게 봅니다",
+                                axis=alt.Axis(format="%Y", tickCount="year", labelFontSize=11)),
+                        y=alt.Y("건수", title=None, axis=None),
+                    )
+                    .add_params(brush)
+                    .properties(width="container", height=60)
+                )
+                chart = alt.vconcat(detail, overview, spacing=8)
+            draw(chart)
+
             if view == "임기 개월로 겹쳐 보기":
                 how = "두 국회를 임기 시작 시점에 맞춰 겹쳤습니다. 같은 가로 위치는 임기 중 같은 시기입니다."
             else:
-                how = "실제 발의 날짜 순서대로 이어서 보여줍니다."
+                how = "아래 작은 그래프에서 구간을 드래그하면 확대되고, 빈 곳을 클릭하면 전체로 돌아갑니다."
             st.caption(f"{len(data):,}건 기준 · {how} 수집한 표본 기준이라 실제 국회 전체 발의 건수와는 다릅니다.")
 
     # 4. 21대와 22대 비교
