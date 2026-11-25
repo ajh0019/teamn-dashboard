@@ -26,6 +26,9 @@ EXAMPLES = ["전기차 화재 안전", "육아휴직 확대", "학교폭력 예�
 # 평가에서 나온 구간별 관련 비율을 근거로 나눈 유사도 등급
 LEVELS = [(40, "매우 유사", "green"), (20, "유사", "blue"), (10, "일부 유사", "orange"), (0, "낮음", "gray")]
 
+# 유사도 막대 색. 등급 배지 색과 맞춤
+BAR_COLORS = {"green": "#16a34a", "blue": "#2563eb", "orange": "#f59e0b", "gray": "#94a3b8"}
+
 # 그래프에서 너무 긴 위원회 이름은 줄여서 보여줌
 SHORT_NAMES = {
     "12.29여객기참사진상규명과피해자및유가족의피해구제를위한특별위원회": "12.29 여객기참사 특별위원회",
@@ -229,6 +232,20 @@ def page_header(title, desc):
     st.markdown(f'<div class="page-desc">{desc}</div>', unsafe_allow_html=True)
 
 
+# 등급 색으로 칠한 유사도 막대
+def score_bar(score, color):
+    width = min(score, 100)
+    st.markdown(
+        f"""
+        <div style="font-size:0.9rem; margin-bottom:4px;">유사도 <b>{score}%</b></div>
+        <div style="background:#e8edf7; border-radius:6px; height:10px; margin-bottom:12px;">
+          <div style="width:{width}%; background:{BAR_COLORS[color]}; height:10px; border-radius:6px;"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # 결과 한 건을 카드로 보여줌
 def show_card(rank, row):
     with card():
@@ -238,7 +255,7 @@ def show_card(rank, row):
             head += " :violet-badge[위원회 대안]"
         st.markdown(head)
         st.markdown(f"#### {rank}. {md_escape(row['BILL_NAME'])}")
-        st.progress(min(row["유사도(%)"] / 100, 1.0), text=f"유사도 {row['유사도(%)']}%")
+        score_bar(row["유사도(%)"], color)
         st.caption(bill_meta(row))
 
         words = row["공통 단어"]
