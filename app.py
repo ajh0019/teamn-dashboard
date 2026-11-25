@@ -1,5 +1,6 @@
 import itertools
 import re
+from urllib.parse import quote
 
 import altair as alt
 import numpy as np
@@ -125,38 +126,49 @@ def highlight(text, words):
     return pattern.sub(lambda m: f":orange-background[{m.group(0)}]", text)
 
 
-# 검색어와 법안에 함께 나온 단어 중 비중이 큰 것
-def common_words(query_vec, i, count=5):
-    both = query_vec.multiply(matrix[i]).toarray().flatten()
-    order = both.argsort()[::-1]
-    found = [terms[k] for k in order if both[k] > 0]
-    # 인공지능이 있으면 인공, 지능은 빼고 보여줌
-    found = [w for w in found if not any(w != x and w in x for x in found)]
-    return found[:count]
+# 두 벡터에 함께 나온 단어와 그 단어가 점수에서 차지하는 비율(%)
+# 코사인 유사도는 단어별 곱의 합이라 단어마다 몫을 나눌 수 있음
+def word_shares(vec_a, vec_b, count=5):
+    both = vec_a.multiply(vec_b).toarray().flatten()
+    total = both.sum()
+    if total == 0:
+        return []
+    found = {terms[k]: both[k] for k in both.argsort()[::-1] if both[k] > 0}
+    # 인공지능이 있으면 인공, 지능의 몫은 인공지능에 합침
+    shares = {}
+    for w, v in found.items():
+        bigger = [x for x in found if x != w and w in x]
+        key = bigger[0] if bigger else w
+        shares[key] = shares.get(key, 0) + v
+    top = sorted(shares.items(), key=lambda x: -x[1])[:count]
+    return [(w, round(v / total * 100)) for w, v in top]
 
 
 # 점수가 높은 순으로 뽑되 내용이 거의 같은 법안은 한 건으로 묶음
 def pick_top(scores, query_vec, top_n=5):
     order = scores.argsort()[::-1][:30]
     picked = []
-    same_count = {}
+    same = {}
     for i in order:
         if scores[i] == 0:
             break
         merged = False
         for j in picked:
             if cosine_similarity(body_matrix[i], body_matrix[j])[0, 0] >= 0.95:
-                same_count[j] += 1
+                same[j].append(i)
                 merged = True
                 break
         if not merged and len(picked) < top_n:
             picked.append(i)
-            same_count[i] = 0
+            same[i] = []
 
     result = df.iloc[picked].copy()
+    result["번호"] = picked
     result["유사도(%)"] = (scores[picked] * 100).round(1)
-    result["동일 내용 법안"] = [same_count[i] for i in picked]
-    result["공통 단어"] = [common_words(query_vec, i) for i in picked]
+    result["동일 내용 법안"] = [len(same[i]) for i in picked]
+    result["동일 목록"] = [same[i] for i in picked]
+    result["단어 기여"] = [word_shares(query_vec, matrix[i]) for i in picked]
+    result["공통 단어"] = [[w for w, _ in s] for s in result["단어 기여"]]
     return result.reset_index(drop=True)
 
 
@@ -232,8 +244,19 @@ def show_card(rank, row):
         words = row["공통 단어"]
         if words:
             st.markdown("겹친 단어 " + " ".join(f":orange-background[{w}]" for w in words))
+            with st.popover("왜 검색됐나요?"):
+                show_shares(row["단어 기여"])
+
+        # 내용이 거의 같은 법안 목록
         if row["동일 내용 법안"] > 0:
-            st.caption(f"내용이 거의 같은 법안이 {row['동일 내용 법안']}건 더 있습니다.")
+            with st.expander(f"내용이 거의 같은 법안 {row['동일 내용 법안']}건 더 보기"):
+                for j in row["동일 목록"]:
+                    other = df.iloc[j]
+                    st.markdown(
+                        f":{result_color(other['PROC_RESULT_CD'])}-badge[{other['PROC_RESULT_CD']}] "
+                        f"[{md_escape(other['BILL_NAME'])}]({other['LINK_URL']})"
+                    )
+                    st.caption(bill_meta(other))
 
         summary = row["SUMMARY"]
         if summary:
@@ -249,17 +272,98 @@ def show_card(rank, row):
             st.markdown(f"[의안정보시스템에서 원문 보기]({row['LINK_URL']})")
 
 
-# 검색 결과 전체를 보여주고 내려받기 버튼을 붙임
-def show_results(result, min_score, key, by_bill=False):
-    if result is None:
-        st.warning("검색어에서 단어를 찾지 못했습니다. 조금 더 구체적으로 입력해 주세요.")
-        return
-    if len(result) == 0:
-        st.info(f"조건에 맞고 유사도가 {min_score}% 이상인 법안이 없습니다. 검색 설정을 바꿔 보세요.")
-        return
+# 단어별로 점수에서 차지한 몫을 막대로 보여줌
+def show_shares(shares):
+    st.caption("겹친 단어가 유사도 점수에서 차지하는 비율입니다.")
+    for w, pct in shares:
+        st.progress(min(pct / 100, 1.0), text=f"{w} {pct}%")
 
-    top, down = st.columns([4, 1], vertical_alignment="center")
+
+# 결과 법안과 같은 내용 법안까지 합쳐 처리 결과와 발의 시점을 요약
+def show_summary(result):
+    rows = list(result["번호"]) + [j for group in result["동일 목록"] for j in group]
+    found = df.iloc[rows]
+
+    with card():
+        st.markdown(f"#### 한눈에 보기 · 관련 법안 {len(found)}건")
+        if len(found) > len(result):
+            st.caption(f"결과 {len(result)}건과 내용이 거의 같은 법안 {len(found) - len(result)}건을 합친 수입니다.")
+
+        counts = found["PROC_RESULT_CD"].value_counts()
+        st.markdown(" ".join(f":{result_color(k)}-badge[{k} {v}건]" for k, v in counts.items()))
+
+        # 같은 주제 법안이 언제 나왔는지 점으로 표시
+        points = found.assign(발의일=pd.to_datetime(found["PROPOSE_DT"]), 처리결과=found["PROC_RESULT_CD"])
+        shown = list(counts.index)
+        chart = (
+            alt.Chart(points)
+            .mark_circle(size=140, opacity=0.85)
+            .encode(
+                x=alt.X("발의일:T", title=None, axis=alt.Axis(format="%Y-%m")),
+                y=alt.Y("대수:N", title=None),
+                color=alt.Color(
+                    "처리결과:N",
+                    scale=alt.Scale(domain=shown, range=[RESULT_COLORS.get(k, "#94a3b8") for k in shown]),
+                    legend=alt.Legend(title=None, orient="right"),
+                ),
+                tooltip=[
+                    alt.Tooltip("BILL_NAME", title="법안명"),
+                    alt.Tooltip("PROPOSER", title="제안자"),
+                    alt.Tooltip("PROPOSE_DT", title="발의일"),
+                    alt.Tooltip("처리결과", title="처리 결과"),
+                ],
+            )
+            .properties(height=110)
+        )
+        draw(chart)
+
+
+# 두 법안을 나란히 놓고 겹친 단어를 표시
+def show_compare(result, key):
+    with card():
+        st.markdown("#### 두 법안 나란히 비교")
+        names = [f"{i + 1}. {n}" for i, n in enumerate(result["BILL_NAME"])]
+        c1, c2 = st.columns(2)
+        a = c1.selectbox("왼쪽 법안", range(len(result)), format_func=lambda i: names[i], key=f"cmp_a_{key}")
+        b = c2.selectbox("오른쪽 법안", range(len(result)), index=1, format_func=lambda i: names[i], key=f"cmp_b_{key}")
+        if a == b:
+            st.info("서로 다른 법안 두 건을 골라 주세요.")
+            return
+
+        i, j = result.loc[a, "번호"], result.loc[b, "번호"]
+        sim = cosine_similarity(matrix[i], matrix[j])[0, 0] * 100
+        shared = [w for w, _ in word_shares(matrix[i], matrix[j], 8)]
+        st.markdown(f"두 법안의 유사도 **{sim:.1f}%**")
+        if shared:
+            st.markdown("함께 나온 단어 " + " ".join(f":orange-background[{w}]" for w in shared))
+
+        left, right = st.columns(2)
+        for col, k in ((left, i), (right, j)):
+            row = df.iloc[k]
+            with col:
+                st.markdown(f":{result_color(row['PROC_RESULT_CD'])}-badge[{row['PROC_RESULT_CD']}]")
+                st.markdown(f"**{md_escape(row['BILL_NAME'])}**")
+                st.caption(bill_meta(row))
+                with st.container(height=320, border=False):
+                    body = clean_summary(row["SUMMARY"])
+                    st.markdown(highlight(body, shared) if body else "제안이유 및 주요내용이 없는 법안입니다.")
+
+
+# 검색 결과 전체를 보여주고 내려받기 버튼을 붙임
+def show_results(result, key, by_bill=False):
+    result = result.copy()
+    result["순위"] = range(1, len(result) + 1)
+
+    show_summary(result)
+
+    top, order, down = st.columns([3, 2, 1], vertical_alignment="center")
     top.markdown(f"**비슷한 법안 {len(result)}건**")
+    sort = order.segmented_control(
+        "정렬", ["유사도순", "최신 발의순"], default="유사도순", key=f"sort_{key}", label_visibility="collapsed"
+    )
+    if sort == "최신 발의순":
+        result = result.sort_values("PROPOSE_DT", ascending=False)
+
     out = result[["BILL_NAME", "AGE", "PROPOSER", "PROPOSE_DT", "CURR_COMMITTEE", "PROC_RESULT_CD", "유사도(%)", "LINK_URL"]]
     out.columns = ["법안명", "대수", "제안자", "발의일", "소관 위원회", "처리 결과", "유사도(%)", "원문"]
     down.download_button(
@@ -271,8 +375,11 @@ def show_results(result, min_score, key, by_bill=False):
         width="stretch",
     )
 
-    for i, row in result.iterrows():
-        show_card(i + 1, row)
+    for _, row in result.iterrows():
+        show_card(row["순위"], row)
+
+    if len(result) >= 2:
+        show_compare(result.sort_values("순위").reset_index(drop=True), key)
 
     if by_bill:
         how = "고른 법안과 각 법안의 TF-IDF 코사인 유사도입니다."
@@ -281,11 +388,40 @@ def show_results(result, min_score, key, by_bill=False):
     st.caption(f"유사도는 {how} 등급 기준은 40% 이상 매우 유사, 20% 이상 유사, 10% 이상 일부 유사입니다.")
 
 
+# 지금 검색 결과를 여는 링크
+def show_share_link(query):
+    base = st.context.url.split("?")[0]
+    with st.popover("🔗 검색 결과 링크"):
+        st.caption("이 주소를 열면 같은 검색 결과가 바로 나옵니다.")
+        st.code(f"{base}?q={quote(query)}", language=None)
+
+
+# 결과가 없을 때 다시 찾아볼 방법을 알려줌
+def show_empty(query, mask, min_score, key):
+    words = extract_words(clean_title(query), compound=False).split()
+    if not words:
+        st.warning("검색어에서 단어를 찾지 못했습니다. 정책 내용을 나타내는 명사를 넣어 다시 검색해 보세요.")
+    else:
+        st.info(f"조건에 맞고 유사도가 {min_score}% 이상인 법안이 없습니다.")
+        lower = search(query, mask, 0)
+        if min_score > 0 and lower is not None and len(lower) > 0:
+            st.caption(f"검색 설정에서 유사도 기준을 낮추면 {len(lower)}건을 볼 수 있습니다.")
+
+    # 단어를 하나씩 떼어 보거나 예시로 검색
+    tries = [w for w in dict.fromkeys(words) if len(words) > 1] + [e for e in EXAMPLES if e != query]
+    st.pills("이렇게 찾아보세요", tries, key=f"retry_{key}", on_change=pick_chip, args=(f"retry_{key}",))
+
+
 # 검색어를 정하고 최근 검색어에 남김
 def run_query(text):
     text = text.strip()
     st.session_state["query"] = text
     st.session_state["active_query"] = text
+    # 주소에 검색어를 남겨 링크로 같은 결과를 열 수 있게 함
+    if text:
+        st.query_params["q"] = text
+    else:
+        st.query_params.pop("q", None)
     if text:
         history = [h for h in st.session_state.get("history", []) if h != text]
         st.session_state["history"] = ([text] + history)[:5]
@@ -379,6 +515,11 @@ def page_search():
     if "pending_query" in st.session_state:
         run_query(st.session_state.pop("pending_query"))
 
+    # 공유받은 링크로 들어오면 주소의 검색어로 바로 검색
+    shared = st.query_params.get("q", "")
+    if shared and shared != st.session_state["active_query"]:
+        run_query(shared)
+
     with card():
         with st.form("search_form", border=False):
             c1, c2 = st.columns([5, 1], vertical_alignment="bottom")
@@ -407,7 +548,12 @@ def page_search():
     if active:
         st.markdown(f"### \"{md_escape(active)}\" 검색 결과")
         mask = make_mask(df, ages, committees, results)
-        show_results(search(active, mask, min_score), min_score, key="find")
+        result = search(active, mask, min_score)
+        if result is None or len(result) == 0:
+            show_empty(active, mask, min_score, key="find")
+        else:
+            show_share_link(active)
+            show_results(result, key="find")
     else:
         st.info("검색어를 입력하거나 예시를 눌러 보세요.")
 
@@ -463,7 +609,11 @@ def page_bills():
 
     if st.session_state.get("similar_bill") == row["BILL_ID"]:
         st.markdown("### 비슷한 법안")
-        show_results(search_by_bill(found.index[pick], 10), 10, key="bill", by_bill=True)
+        result = search_by_bill(found.index[pick], 10)
+        if len(result) == 0:
+            st.info("유사도가 10% 이상인 법안이 없습니다.")
+        else:
+            show_results(result, key="bill", by_bill=True)
 
 
 # 처리 결과별 고정 색. 배지 색과 맞춤
